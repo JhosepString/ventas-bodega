@@ -157,22 +157,11 @@ CREATE TABLE venta (
 
 ## 3. Contratos de clases
 
-Todos los archivos PHP inician con `declare(strict_types=1);` y usan el namespace `App\`. A continuación solo las **firmas** (contratos), no la implementación.
+Todos los archivos de clases inician con `declare(strict_types=1);` y usan el namespace `App\` correspondiente a su carpeta plural. Los puntos de entrada, la configuración y las plantillas son archivos PHP procedurales. A continuación solo las **firmas** (contratos), no la implementación.
 
 ### 3.1 Configuración y conexión
 
-```php
-<?php
-declare(strict_types=1);
-
-namespace App\Config;
-
-class Env {
-    // Lee el archivo .env y expone variables como DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASS.
-    public static function load(string $path): void;
-    public static function get(string $key, ?string $default = null): ?string;
-}
-```
+`config/database.php` lee `.env`, valida `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER` y `DB_PASS`, y devuelve la configuración tipada para crear PDO. No contiene credenciales reales ni ejecuta reglas de negocio.
 
 ```php
 <?php
@@ -183,19 +172,28 @@ namespace App\Database;
 use PDO;
 
 class Connection {
-    // Crea la instancia PDO desde variables de entorno (.env).
-    public function __construct();
+    // Recibe la conexión PDO configurada por public/index.php.
+    public function __construct(PDO $pdo);
 
-    // Devuelve la conexión PDO con excepciones habilitadas (ERRMODE_EXCEPTION).
+    // Devuelve la conexión PDO compartida con los repositorios.
     public function pdo(): PDO;
 
-    // Inicia una transacción.
+    // Implementa TransaccionInterface delegando en PDO.
     public function begin(): void;
-
-    // Confirma la transacción.
     public function commit(): void;
+    public function rollBack(): void;
+}
+```
 
-    // Revierte la transacción.
+```php
+<?php
+declare(strict_types=1);
+
+namespace App\Database;
+
+interface TransaccionInterface {
+    public function begin(): void;
+    public function commit(): void;
     public function rollBack(): void;
 }
 ```
@@ -206,7 +204,7 @@ class Connection {
 <?php
 declare(strict_types=1);
 
-namespace App\Model;
+namespace App\Models;
 
 class Producto {
     public function __construct(
@@ -225,7 +223,7 @@ class Producto {
 <?php
 declare(strict_types=1);
 
-namespace App\Model;
+namespace App\Models;
 
 class Venta {
     public function __construct(
@@ -245,11 +243,9 @@ class Venta {
 <?php
 declare(strict_types=1);
 
-namespace App\Repository;
+namespace App\Repositories;
 
-use App\Model\Producto;
-use App\Database\Connection;
-
+use App\Models\Producto;
 interface ProductoRepositoryInterface {
     // Inserta un producto. Lanza excepción si falla la BD (incluye duplicado de código único).
     public function create(Producto $producto): int;
@@ -257,9 +253,19 @@ interface ProductoRepositoryInterface {
     // Devuelve un Producto por id o null si no existe.
     public function findById(int $id): ?Producto;
 
+    // Busca por código único; null significa que no existe.
+    public function findByCodigo(string $codigo): ?Producto;
+
+    // Busca y bloquea la fila durante la transacción activa.
+    public function findByIdForUpdate(int $id): ?Producto;
+
     // Devuelve todos los productos. Lanza excepción si falla la BD.
     /** @return Producto[] */
     public function findAll(): array;
+
+    // Devuelve productos cuyo stock está en o por debajo del mínimo.
+    /** @return Producto[] */
+    public function findStockBajo(): array;
 
     // Descuenta stock de un producto (dentro de una transacción). Lanza excepción si falla.
     public function descontarStock(int $productoId, int $cantidad): void;
@@ -270,11 +276,9 @@ interface ProductoRepositoryInterface {
 <?php
 declare(strict_types=1);
 
-namespace App\Repository;
+namespace App\Repositories;
 
-use App\Model\Venta;
-use App\Database\Connection;
-
+use App\Models\Venta;
 interface VentaRepositoryInterface {
     // Inserta una venta (dentro de una transacción). Lanza excepción si falla la BD.
     public function create(Venta $venta): int;
@@ -294,16 +298,14 @@ interface VentaRepositoryInterface {
 <?php
 declare(strict_types=1);
 
-namespace App\Service;
+namespace App\Services;
 
-use App\Model\Producto;
-use App\Repository\ProductoRepositoryInterface;
-use App\Database\Connection;
+use App\Models\Producto;
+use App\Repositories\ProductoRepositoryInterface;
 
 class ProductoService {
     public function __construct(
-        private ProductoRepositoryInterface $repository,
-        private Connection $connection
+        private ProductoRepositoryInterface $repository
     ) {}
 
     // Crea un producto validando precio >= 0 (RN-03) y código único (RN-04).
@@ -312,6 +314,10 @@ class ProductoService {
     // Lista todos los productos.
     /** @return Producto[] */
     public function listar(): array;
+
+    // Lista productos cuyo stock está en o por debajo del mínimo.
+    /** @return Producto[] */
+    public function listarStockBajo(): array;
 }
 ```
 
@@ -319,18 +325,18 @@ class ProductoService {
 <?php
 declare(strict_types=1);
 
-namespace App\Service;
+namespace App\Services;
 
-use App\Repository\ProductoRepositoryInterface;
-use App\Repository\VentaRepositoryInterface;
-use App\Database\Connection;
-use App\Model\Venta;
+use App\Repositories\ProductoRepositoryInterface;
+use App\Repositories\VentaRepositoryInterface;
+use App\Database\TransaccionInterface;
+use App\Models\Venta;
 
 class VentaService {
     public function __construct(
         private ProductoRepositoryInterface $productoRepository,
         private VentaRepositoryInterface $ventaRepository,
-        private Connection $connection
+        private TransaccionInterface $transaccion
     ) {}
 
     // Registra una venta en una sola transacción (RN-05).
@@ -352,9 +358,9 @@ class VentaService {
 <?php
 declare(strict_types=1);
 
-namespace App\Controller;
+namespace App\Controllers;
 
-use App\Service\ProductoService;
+use App\Services\ProductoService;
 use App\Security\Csrf;
 
 class ProductoController {
@@ -375,9 +381,9 @@ class ProductoController {
 <?php
 declare(strict_types=1);
 
-namespace App\Controller;
+namespace App\Controllers;
 
-use App\Service\VentaService;
+use App\Services\VentaService;
 use App\Security\Csrf;
 
 class VentaController {
@@ -417,7 +423,7 @@ class Csrf {
 <?php
 declare(strict_types=1);
 
-namespace App\Exception;
+namespace App\Exceptions;
 
 // Para errores de validación de reglas de negocio (cantidad, stock, precio, código duplicado).
 class ValidacionException extends \RuntimeException {}
@@ -436,17 +442,17 @@ class NoEncontradoException extends \RuntimeException {}
 Este flujo vive en `VentaService::registrar(int $productoId, int $cantidad)` y satisface **RN-05** (la venta y el descuento de stock ocurren juntos o no ocurre ninguno).
 
 1. **Validación de entrada (RN-01):** si `$cantidad <= 0`, lanza `ValidacionException` ("La cantidad vendida debe ser mayor que cero"). No se abre transacción.
-2. **Apertura de transacción:** `$connection->begin()`.
-3. **Lectura del producto:** `$productoRepository->findById($productoId)`.
+2. **Apertura de transacción:** `$transaccion->begin()`.
+3. **Lectura del producto:** `$productoRepository->findByIdForUpdate($productoId)`.
    - Si devuelve `null`, lanza `NoEncontradoException` ("El producto no existe"). El bloque finally/e catch ejecuta `rollBack()`.
 4. **Validación de stock (RN-02):** si `$cantidad > $producto->stock_actual`, lanza `ValidacionException` ("No se puede vender más de lo que hay en stock"). Se hace `rollBack()`.
 5. **Toma del precio vigente:** `$precioUnitario = $producto->precio_venta`.
 6. **Cálculo del total:** `$total = $precioUnitario * $cantidad`.
 7. **Registro de la venta:** `$ventaRepository->create(new Venta(null, $productoId, $cantidad, $precioUnitario, $total, null))`.
 8. **Descuento de stock:** `$productoRepository->descontarStock($productoId, $cantidad)`.
-9. **Confirmación:** `$connection->commit()`. La venta y el descuento quedan aplicados juntos.
-10. **En caso de error en los pasos 7 u 8:** se captura la excepción, se ejecuta `$connection->rollBack()` y se relanza como `DatabaseException`, de modo que **ninguna** de las dos operaciones queda aplicada (RN-05).
-11. **Retorno:** el `Venta` creado (con el `id` y `fecha_hora` asignados por la BD).
+9. **Confirmación:** `$transaccion->commit()`. La venta y el descuento quedan aplicados juntos.
+10. **En caso de error:** se ejecuta `$transaccion->rollBack()` y se relanza como `DatabaseException`, de modo que **ninguna** de las dos operaciones queda aplicada (RN-05).
+11. **Retorno:** la venta creada con su identificador, precio, total y fecha/hora.
 
 Esquema del control de excepciones:
 
@@ -469,7 +475,7 @@ except (ValidacionException | NoEncontradoException):
     throw   // se propagan al controller como mensaje claro
 ```
 
-> Nota: con el supuesto de un solo cajero no hay concurrencia real, por lo que no se requiere `SELECT ... FOR UPDATE`. La transacción es suficiente para garantizar la atomicidad de venta + descuento.
+> El bloqueo `SELECT ... FOR UPDATE` evita que dos solicitudes simultáneas lean y gasten el mismo stock; la atomicidad de ambos cambios sigue dependiendo de la transacción InnoDB.
 
 ---
 
@@ -505,7 +511,7 @@ DB_PASS=
 ```
 
 - El archivo `.env` se excluye del control de versiones (`.gitignore`) y se provee un `.env.example` con valores sin secretos.
-- Ningún componente hardcodea host, puerto, usuario ni contraseña: todos los leen desde `App\Config\Env`.
+- Ningún componente hardcodea host, puerto, usuario ni contraseña: `config/database.php` carga y valida los valores del `.env`.
 
 ---
 
@@ -513,55 +519,61 @@ DB_PASS=
 
 ```
 ventas-bodega/
-├── .env                  # Credenciales y parámetros (NO versionado)
-├── .env.example          # Plantilla del .env (versionada, sin secretos)
+├── .env
+├── .env.example
 ├── .gitignore
-├── index.php             # Front controller / enrutador simple
+├── bootstrap.php
+├── config/
+│   └── database.php
 ├── app/
-│   ├── Config/
-│   │   └── Env.php
 │   ├── Database/
+│   │   ├── TransaccionInterface.php
 │   │   └── Connection.php
-│   ├── Model/
+│   ├── Models/
 │   │   ├── Producto.php
 │   │   └── Venta.php
-│   ├── Repository/
+│   ├── Repositories/
 │   │   ├── ProductoRepositoryInterface.php
 │   │   ├── ProductoRepository.php
 │   │   ├── VentaRepositoryInterface.php
 │   │   └── VentaRepository.php
-│   ├── Service/
+│   ├── Services/
 │   │   ├── ProductoService.php
 │   │   └── VentaService.php
-│   ├── Controller/
-│   │   ├── ProductoController.php
-│   │   └── VentaController.php
+│   ├── Exceptions/
+│   │   ├── ValidacionException.php
+│   │   ├── DatabaseException.php
+│   │   ├── NoEncontradoException.php
+│   │   └── PeticionInvalidaException.php
 │   ├── Security/
 │   │   └── Csrf.php
-│   └── Exception/
-│       ├── ValidacionException.php
-│       ├── DatabaseException.php
-│       └── NoEncontradoException.php
+│   └── Controllers/
+│       ├── ProductoController.php
+│       └── VentaController.php
 ├── views/
 │   ├── layouts/
-│   │   └── header.php
+│   │   ├── header.php
+│   │   └── footer.php
 │   ├── productos/
 │   │   ├── crear.php
 │   │   └── listar.php
 │   └── ventas/
 │       ├── registrar.php
 │       └── listar.php
+├── public/
+│   └── index.php
 ├── database/
-│   └── schema.sql         # DDL de producto y venta
-├── docs/
-│   └── D0.md              # Documento base
-├── requirements.md
-└── design.md
+│   ├── schema.sql
+│   └── seed.sql
+└── tests/
+    └── run.php
 ```
 
-Notas de la estructura:
-- `app/` contiene todo el código PHP bajo el namespace `App\` con autoloading PSR-4.
-- `views/` queda fuera de `app/` porque contiene plantillas de presentación, no clases.
-- `database/schema.sql` centraliza el DDL para versionado y despliegue local.
-- El `.env` vive en la raíz y solo es leído por `App\Config\Env`.
-- `index.php` es el único punto de entrada público: recibe la petición, enruta al controller correspondiente y renderiza la vista.
+Notas de implementación:
+- El orden de dependencias es Config/Database → Models → Repositories → Services → Exceptions → Security → Controllers → views → `bootstrap.php` y `public/index.php`.
+- `bootstrap.php` registra el autoloader propio `App\` → `app/` con `spl_autoload_register`; no se utiliza Composer.
+- Los namespaces siguen el nombre plural de las carpetas: `App\Models`, `App\Repositories`, `App\Services`, `App\Exceptions` y `App\Controllers`.
+- `config/database.php` lee y valida el `.env`; `public/index.php` configura PDO con ese arreglo y construye las dependencias.
+- `VentaService` recibe `TransaccionInterface`, y `Connection` la implementa; por eso los tests pueden usar una transacción falsa sin base de datos.
+- `ProductoRepositoryInterface` expone `findByCodigo()` y `findStockBajo()`; el Service presenta la segunda operación como `listarStockBajo()`.
+- Apache debe servir la carpeta `public/` como raíz web. Las credenciales permanecen en el `.env` raíz, fuera del directorio público.
