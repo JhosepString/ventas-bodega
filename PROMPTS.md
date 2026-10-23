@@ -1,5 +1,5 @@
 
-------------------------------------------- PROMPT 1 -------------------------------------------
+# Prompts usados
 
 Hola, necesito que actúes como analista de sistemas y redactes un D0.md (documento base) en español para este caso:
 
